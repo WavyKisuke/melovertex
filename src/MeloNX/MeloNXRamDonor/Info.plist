@@ -16,8 +16,19 @@
     <dict>
         <key>NSExtensionActivationRule</key>
         <string>FALSEPREDICATE</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>MLXRamDonorHandler</string>
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.ar.viewer</string>
     </dict>
+    <key>XPCService</key>
+    <dict>
+        <key>ServiceType</key>
+        <string>Application</string>
+    </dict>
+    <key>_MultipleInstances</key>
+    <true/>
+    <key>_ProcessType</key>
+    <string>App</string>
 </dict>
 </plist>
