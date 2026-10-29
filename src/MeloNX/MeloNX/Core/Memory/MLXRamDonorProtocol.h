@@ -2,9 +2,8 @@
 //  MLXRamDonorProtocol.h
 //  MeloNX
 //
-//  RAM donor IPC protocol.
+//  RAM donor XPC protocol. Based on the GPL-licensed Melo donor implementation.
 //
-
 #ifndef MLXRamDonorProtocol_h
 #define MLXRamDonorProtocol_h
 
@@ -24,6 +23,9 @@
 #define MLXDonorOpRelease    "release"
 #define MLXDonorOpAvailable  "available"
 #define MLXDonorOpPhysMem    "phys_footprint"
+#define MLXDonorOpAttach     "attach"
+#define MLXDonorOpBless      "bless"
+#define MLXDonorOpDetach     "detach"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -40,11 +42,11 @@ static inline NSXPCListenerEndpoint *MLXWrapEndpoint(xpc_endpoint_t endpoint)
 
 static inline xpc_endpoint_t _Nullable MLXUnwrapEndpoint(NSXPCListenerEndpoint *_Nullable wrapper)
 {
-    if (!wrapper) return nil;
     xpc_object_t inner = wrapper._endpoint;
     if (!inner || xpc_get_type(inner) != XPC_TYPE_ENDPOINT) return nil;
     return (xpc_endpoint_t)inner;
 }
 
 NS_ASSUME_NONNULL_END
-#endif
+
+#endif /* MLXRamDonorProtocol_h */
