@@ -1,89 +1,78 @@
-#import <Foundation/Foundation.h>
+@import Foundation;
 #import <mach/mach.h>
 #import <os/proc.h>
 #import <xpc/xpc.h>
-
 #import "../MeloNX/Core/Memory/MLXRamDonorProtocol.h"
 
-@interface DonorHandler : NSObject
-@end
+extern kern_return_t mach_vm_allocate(vm_map_t target, mach_vm_address_t *address, mach_vm_size_t size, int flags);
+extern kern_return_t mach_vm_deallocate(vm_map_t target, mach_vm_address_t address, mach_vm_size_t size);
+#ifndef VM_FLAGS_PURGABLE
+#define VM_FLAGS_PURGABLE 0x2
+#endif
 
-@implementation DonorHandler {
-    NSMutableArray<NSValue *> *_regions;
-}
-
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _regions = [NSMutableArray array];
+static NSMutableArray<NSValue *> *gRegions;
+static void MLXReleaseRegions(void) {
+    for (NSUInteger i = 0; i + 1 < gRegions.count; i += 2) {
+        mach_vm_address_t base = (mach_vm_address_t)(uintptr_t)gRegions[i].pointerValue;
+        mach_vm_size_t size = (mach_vm_size_t)(uintptr_t)gRegions[i + 1].pointerValue;
+        mach_vm_deallocate(mach_task_self(), base, size);
     }
-    return self;
+    [gRegions removeAllObjects];
+}
+static xpc_object_t MLXCreateRegion(uint64_t size, NSString **error) {
+    if (!size) { *error = @"Refusing to create a zero sized region"; return nil; }
+    mach_vm_address_t address = 0;
+    kern_return_t kr = mach_vm_allocate(mach_task_self(), &address, size, VM_FLAGS_ANYWHERE | VM_FLAGS_PURGABLE);
+    if (kr != KERN_SUCCESS) { *error = [NSString stringWithFormat:@"mach_vm_allocate failed: %s", mach_error_string(kr)]; return nil; }
+    xpc_object_t shmem = xpc_shmem_create((void *)address, (size_t)size);
+    if (!shmem) { mach_vm_deallocate(mach_task_self(), address, size); *error = @"xpc_shmem_create returned NULL"; return nil; }
+    gRegions = gRegions ?: [NSMutableArray array];
+    [gRegions addObject:[NSValue valueWithPointer:(void *)(uintptr_t)address]];
+    [gRegions addObject:[NSValue valueWithPointer:(void *)(uintptr_t)size]];
+    return shmem;
+}
+static uint64_t getMemoryFootprint(void) {
+    task_vm_info_data_t vmInfo; mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmInfo, &count) != KERN_SUCCESS) return 0;
+    return (uint64_t)vmInfo.phys_footprint;
+}
+static void MLXHandleMessage(xpc_connection_t channel, xpc_object_t message) {
+    if (xpc_get_type(message) != XPC_TYPE_DICTIONARY) return;
+    const char *op = xpc_dictionary_get_string(message, MLXDonorKeyOp); if (!op) return;
+    xpc_object_t reply = xpc_dictionary_create_reply(message); if (!reply) return;
+    if (!strcmp(op, MLXDonorOpCreate)) {
+        NSString *error = nil; xpc_object_t shmem = MLXCreateRegion(xpc_dictionary_get_uint64(message, MLXDonorKeySize), &error);
+        if (shmem) xpc_dictionary_set_value(reply, MLXDonorKeyShmem, shmem); else xpc_dictionary_set_string(reply, MLXDonorKeyError, error.UTF8String);
+    } else if (!strcmp(op, MLXDonorOpRelease)) {
+        MLXReleaseRegions();
+    } else if (!strcmp(op, MLXDonorOpAvailable)) {
+        xpc_dictionary_set_uint64(reply, MLXDonorKeyAvailable, (uint64_t)os_proc_available_memory());
+    } else if (!strcmp(op, MLXDonorOpPhysMem)) {
+        xpc_dictionary_set_uint64(reply, MLXDonorKeyPhysMem, getMemoryFootprint());
+    } else {
+        xpc_dictionary_set_string(reply, MLXDonorKeyError, "Unknown operation");
+    }
+    xpc_connection_send_message(channel, reply);
 }
 
-- (void)handleConnection:(xpc_connection_t)connection {
-    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
-        if (xpc_get_type(event) != XPC_TYPE_DICTIONARY) {
-            return;
-        }
-
-        const char *operation = xpc_dictionary_get_string(event, MLXRamDonorXPCOperationKey);
-        if (operation == NULL) {
-            return;
-        }
-
-        if (strcmp(operation, MLXRamDonorXPCOperationCreate) == 0) {
-            uint64_t requested = xpc_dictionary_get_uint64(event, MLXRamDonorXPCRequestedBytesKey);
-            uint64_t granted = requested - (requested % MLXRamDonorChunkSize);
-            if (granted == 0) {
-                granted = MLXRamDonorChunkSize;
-            }
-
-            vm_address_t address = 0;
-            kern_return_t kr = mach_vm_allocate(mach_task_self(), &address, granted, VM_FLAGS_ANYWHERE | VM_FLAGS_PURGABLE);
-            xpc_object_t reply = xpc_dictionary_create_reply(event);
-            if (reply == NULL) {
-                if (kr == KERN_SUCCESS) {
-                    mach_vm_deallocate(mach_task_self(), address, granted);
-                }
-                return;
-            }
-
-            if (kr == KERN_SUCCESS) {
-                [_regions addObject:[NSValue valueWithPointer:(void *)address]];
-                xpc_dictionary_set_uint64(reply, MLXRamDonorGrantedBytesKey, granted);
-                xpc_dictionary_set_value(reply, MLXRamDonorShmemKey, xpc_shmem_create(NULL, (void *)address, granted));
-            } else {
-                xpc_dictionary_set_uint64(reply, MLXRamDonorGrantedBytesKey, 0);
-                xpc_dictionary_set_string(reply, MLXRamDonorErrorKey, mach_error_string(kr));
-            }
-            xpc_connection_send_message(connection, reply);
-            return;
-        }
-
-        if (strcmp(operation, MLXRamDonorXPCOperationRelease) == 0) {
-            xpc_object_t shmem = xpc_dictionary_get_value(event, MLXRamDonorShmemKey);
-            void *address = NULL;
-            size_t size = 0;
-            if (shmem != NULL && xpc_get_type(shmem) == XPC_TYPE_SHMEM) {
-                xpc_shmem_map(shmem, &address, &size);
-                if (address != NULL && size != 0) {
-                    mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)address, size);
-                }
-            }
-            return;
-        }
+@interface MLXRamDonorHandler : NSObject <NSExtensionRequestHandling>
+@end
+@implementation MLXRamDonorHandler {
+    xpc_connection_t _channel;
+}
+- (void)beginRequestWithExtensionContext:(NSExtensionContext *)context {
+    NSExtensionItem *item = (NSExtensionItem *)context.inputItems.firstObject;
+    id wrapper = item.userInfo[@"endpoint"];
+    xpc_endpoint_t endpoint = MLXUnwrapEndpoint([wrapper isKindOfClass:NSXPCListenerEndpoint.class] ? wrapper : nil);
+    if (!endpoint) return;
+    _channel = xpc_connection_create_from_endpoint(endpoint);
+    xpc_connection_set_event_handler(_channel, ^(xpc_object_t event) {
+        if (xpc_get_type(event) == XPC_TYPE_ERROR) exit(0);
+        MLXHandleMessage(self->_channel, event);
     });
-    xpc_connection_resume(connection);
+    xpc_connection_resume(_channel);
+    xpc_object_t hello = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_string(hello, MLXDonorKeyOp, "hello");
+    xpc_connection_send_message(_channel, hello);
 }
-
 @end
-
-int main(int argc, const char *argv[]) {
-    @autoreleasepool {
-        DonorHandler *handler = [DonorHandler new];
-        xpc_main(^(xpc_connection_t connection) {
-            [handler handleConnection:connection];
-        });
-    }
-    return 0;
-}
