@@ -1,14 +1,21 @@
 import Foundation
 
-/// Controls the iOS RAM-donor helper. The native implementation is intentionally
-/// isolated here so the emulator can continue to run normally when the helper
-/// extension is unavailable.
+@_silgen_name("mlx_ram_donor_is_available") private func mlx_ram_donor_is_available() -> Bool
+@_silgen_name("mlx_ram_donor_last_error") private func mlx_ram_donor_last_error() -> UnsafePointer<CChar>?
+@_silgen_name("mlx_ram_donor_set_kill_after_mapping") private func mlx_ram_donor_set_kill_after_mapping(_ enabled: Bool)
+@_silgen_name("mlx_ram_donor_acquire_up_to") private func mlx_ram_donor_acquire_up_to(_ size: UInt64, _ minimum: UInt64, _ actual: UnsafeMutablePointer<UInt64>) -> UnsafeMutableRawPointer?
+@_silgen_name("mlx_ram_donor_release") private func mlx_ram_donor_release(_ base: UnsafeMutableRawPointer)
+@_silgen_name("mlx_ram_donor_shutdown") private func mlx_ram_donor_shutdown()
+@_silgen_name("offer_donated_memory") private func offer_donated_memory(_ base: UnsafeMutableRawPointer, _ size: UInt64)
+@_silgen_name("withdraw_donated_memory") private func withdraw_donated_memory()
+
 enum RamDonor {
     private static let mib: UInt64 = 1024 * 1024
+    private static let enabledKey = "donateGuestMemory"
 
     static var isEnabled: Bool {
-        get { NativeSettingsManager.shared.setting(forKey: "donateGuestMemory", default: true).value }
-        set { NativeSettingsManager.shared.setting(forKey: "donateGuestMemory", default: true).value = newValue }
+        get { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
     }
 
     private(set) static var region: UnsafeMutableRawPointer?
@@ -31,10 +38,10 @@ enum RamDonor {
     static func prepare(bytes: UInt64) -> Bool {
         guard bytes > 0 else { return fail("Asked for no memory") }
         guard isEnabled else { return fail("Memory donation is disabled") }
-        guard mlx_ram_donor_is_available() != 0 else { return fail("The RAM helper is missing from this build") }
+        guard mlx_ram_donor_is_available() else { return fail("The RAM helper is missing from this build") }
         guard region == nil else { return true }
 
-        mlx_ram_donor_set_kill_after_mapping(1)
+        mlx_ram_donor_set_kill_after_mapping(true)
         var granted: UInt64 = 0
         let minimum = min(bytes, 256 * mib)
 
